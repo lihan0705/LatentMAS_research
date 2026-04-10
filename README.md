@@ -121,7 +121,29 @@ compared to standard Text-MAS or chain-of-thought baselines.
 
 ## 🛠️ Getting Started
 
-This repository provides all code for reproducing LatentMAS, TextMAS, and baseline single-agent experiments across GSM8K, AIME24/25, GPQA, ARC-Easy/Challenge, MBPP+, HumanEval+, and MedQA.
+### 🚀 **Latest Feature: Latent Tool Calling ($\mathcal{L}$-Tool / LTE-MAS)**
+
+We have recently integrated **Latent Tool Embeddings (LTE-MAS)** into the framework, enabling agents to interact with external tools (Python, Search, APIs) directly from the latent space.
+
+#### **1. Benchmark: BFCL v3 (Berkeley Function Calling)**
+To evaluate the latest LTE-MAS performance on the BFCL v3 benchmark:
+
+```bash
+# Test on BFCL v3 Simple (100 samples)
+python run_test_bfcl.py --method latent_mas_tool --model_name Qwen/Qwen3-8B --dataset data/test_dataset_bfcl_v3_simple.json --max_samples 100
+
+# Test on BFCL v3 Multiple (Complex APIs)
+python run_test_bfcl.py --method latent_mas_tool --model_name Qwen/Qwen3-8B --dataset data/bfcl_v3/BFCL_v3_exec_multiple.json --max_samples 50
+```
+
+#### **2. General Tool Calling (Python / Math)**
+To run LatentMAS with Python execution for mathematical or logical reasoning:
+
+```bash
+python run_tool.py --method latent_mas_tool --model_name Qwen/Qwen3-8B --task toolcalling --enable_tools
+```
+
+---
 
 ### ⚙️ Setup Environment Variables
 
