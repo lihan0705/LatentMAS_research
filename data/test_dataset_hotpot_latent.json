@@ -1,0 +1,40 @@
+[
+  {
+    "question": "Were Scott Derrickson and Ed Wood of the same nationality?",
+    "gold": "yes",
+    "context": [
+      ["Ed Wood (film)", ["Ed Wood is a 1994 American biographical period comedy-drama film directed and produced by Tim Burton, and starring Johnny Depp as cult filmmaker Ed Wood."]],
+      ["Scott Derrickson", ["Scott Derrickson (born July 16, 1966) is an American director, screenwriter and producer. He lives in Los Angeles, California."]]
+    ]
+  },
+  {
+    "question": "Which award-winning film did the director of 'Sinister' also direct?",
+    "gold": "Doctor Strange",
+    "context": [
+      ["Scott Derrickson", ["He is best known for directing horror films such as \"Sinister\", \"The Exorcism of Emily Rose\", and \"Deliver Us From Evil\", as well as the 2016 Marvel Cinematic Universe installment, \"Doctor Strange.\""]]
+    ]
+  },
+  {
+    "question": "What is the population of the CDP where the namesake for Ed Wood Sr. is located?",
+    "gold": "403",
+    "context": [
+      ["Woodson, Arkansas", ["Woodson is a census-designated place (CDP) in Pulaski County, Arkansas, in the United States. Its population was 403 at the 2010 census.", "Woodson and its accompanying Woodson Lake and Wood Hollow are the namesake for Ed Wood Sr."]]
+    ]
+  },
+  {
+    "question": "Are the directors of 'John Wick' and 'Doctor Strange' both American?",
+    "gold": "yes",
+    "context": [
+      ["John Wick", ["John Wick is a 2014 American neo-noir action thriller film directed by Chad Stahelski and David Leitch."]],
+      ["Scott Derrickson", ["Scott Derrickson (born July 16, 1966) is an American director, screenwriter and producer."]]
+    ]
+  },
+  {
+    "question": "What is the common genre of the work of Tyler Bates and the director of 'Sinister'?",
+    "gold": "horror",
+    "context": [
+      ["Tyler Bates", ["Much of his work is in the action and horror film genres. He has collaborated with directors like Scott Derrickson."]],
+      ["Scott Derrickson", ["He is best known for directing horror films such as \"Sinister\"."]]
+    ]
+  }
+]
