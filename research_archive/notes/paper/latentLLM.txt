@@ -1,0 +1,1222 @@
+Latent Reasoning with Supervised Thinking States
+Ido Amos 1 2 * Avi Caciularu1 Mor Geva 1 3 Amir Globerson 1 3 Jonathan Herzig 1 Lior Shani 1 Idan Szpektor 1
+Abstract
+Reasoning with a chain-of-thought (CoT) enables
+Large Language Models (LLMs) to solve complex
+tasks but incurs significant inference costs due to
+the generation of long rationales. We propose
+Thinking States, a method that performs reason-
+ingwhilethe input is processing. Specifically,
+Thinking States generates sequences of thinking
+tokens every few input tokens, transforms the
+thoughts back into embedding space, and adds
+them to the following input tokens. This has two
+key advantages. First, it captures the recurrent
+nature of CoT, but where the thought tokens are
+generated as input is processing. Second, since
+the thoughts are represented as tokens, they can be
+learned from natural language supervision, and us-
+ing teacher-forcing, which is parallelizable. Em-
+pirically, Thinking States outperforms other latent
+reasoning methods on multiple reasoning tasks,
+narrowing the gap to CoT on math problems, and
+matching its performance on 2-Hop QA with im-
+proved latency. On state-tracking tasks, we show
+Thinking States leads to stronger reasoning behav-
+ior than CoT, successfully extrapolating to longer
+sequences than seen during training.
+1. Introduction
+Generating intermediate reasoning steps prior to answer-
+ing enables large language models (LLMs) to tackle chal-
+lenging problems with considerably greater accuracy (Wei
+et al., 2022). Such chain-of-thought (CoT) reasoning yields
+substantial performance gains, but may incur significant
+inference-time cost because of generating additional tokens.
+Thus, the challenge of reducing computational cost of rea-
+soning while preserving accuracy has attracted considerable
+attention recently (Xia et al., 2025; Kang et al., 2024; Hassid
+et al., 2025; Hao et al., 2024).
+One approach to reducing reasoning tokens is to not require
+*Work done during an internship at Google Research. 1Google
+Research 2The Hebrew University of Jerusalem 3Tel Aviv Univer-
+sity. Correspondence to: Ido Amos<idoamos@mail.tau.ac.il>.
+Preprint. February 10, 2026.
+thinking tokens to be in natural language, but rather be con-
+tinuous embeddings (Hao et al., 2024; Shen et al., 2025).
+Indeed, language is highly redundant, and one can therefore
+expect shorter reasoning traces in this case. On the other
+hand, it is then harder to supervise these “continuous latent”
+thoughts, as target values for the latents are unknown, which
+requires backpropagation through time (BPTT) from the
+desired outcome, making training considerably more chal-
+lenging and limiting the number of latents that can be used
+in practice. An alternative approach has been to distill the
+thinking pattern directly to the representations of the query,
+rather than generate any extra tokens (Deng et al., 2024).
+While supporting parallel training, the resulting architecture
+cannot effectively condition on thoughts. As queries are pro-
+cessed in parallel, sequential thinking can only be realized
+through the LLM’s depth, which is typically fixed, resulting
+in reduced expressivity compared to CoT models.1
+Motivated by these previous works we present an architec-
+ture that allows conditioning on thinking as in CoT, yet does
+not append thinking tokens to the context or suffer from
+optimization with BPTT. OurThinking Statesmodel builds
+on several key ideas, illustrated in Figure 1.Compute Shar-
+ing:thoughts are generated using representations of existing
+tokens.Recurrence:these thoughts are fed back as input
+(as in regular CoT) along with future tokens, not increasing
+the context length.Supervision with Natural Language:
+the thought tokens can be supervised via natural language,
+and thus benefit from available supervision used by prior
+CoT methods, and maintain interpretability.
+We evaluate Thinking States on synthetic and real-world
+datasets, demonstrating that it is more accurate than base-
+lines that reduce CoT lengths, and provides a significant
+latency advantage compared to CoT. Moreover, we demon-
+strate that Thinking States can be trained significantly faster
+than models with latent thoughts that require BPTT.
+Our contributions are as follows:
+(i) We introduce Thinking States, a recurrent reasoning
+mechanism that generates natural-language thoughts
+while processing the input, without increasing the con-
+1Put differently, CoT can be viewed as providing the model
+with additional depth, which Deng et al. (2024) does not benefit
+from.
+1
+arXiv:2602.08332v1  [cs.CL]  9 Feb 2026
+Latent Reasoning with Supervised Thinking States
+LLM
+Language 
+Tokens
+Thinking
+States
+Thinking States Chain-of-Thought
+C
+CCompression
+Block
+⠇S
+S
+S
+C
+⠇
+Figure 1.Reasoning with aThinking Statecompared to Chain-of-Thought: An LLM is trained to generate task-relevant thinkingsequences
+while processing tokens. Each generated thought sequence is transformed into a fixed-size state, denoted by S, added to the following
+token representations.
+text length.
+(ii) Because thoughts are represented in natural language,
+Thinking States can be trained with teacher-forcing
+the thoughts, enabling fully parallel training and avoid-
+ing the computational overhead of backpropagation
+through time.
+(iii) We demonstrate that Thinking States consistently out-
+performs existing latent reasoning methods on vari-
+ous benchmarks, matches or exceeds CoT accuracy on
+multi-hop QA and state-tracking tasks, and achieves
+significant speedups compared to CoT on all tasks.
+2. Related Work
+Latent Reasoning.A prominent line of research focuses
+on adapting pretrained LLMs to internalize chain-of-thought
+(CoT) reasoning into compressed representations. Initial
+efforts distilled knowledge from a CoT-capable teacher
+model directly into the query representations of a student
+model (Deng et al., 2023). A related approach employs
+an iterative training curriculum that progressively removes
+explicit reasoning steps from the supervision signal, com-
+pelling the model to internalize the reasoning process (Deng
+et al., 2024). Hao et al. (2024) extended this idea by in-
+troducing recurrent “continuous thought tokens” that are
+iteratively refined after processing the query. While promis-
+ing, this recurrent formulation necessitates backpropagation
+through time (BPTT), which is computationally intensive
+and limits scalability. More recently, Shen et al. (2025)
+proposed adding a distillation loss that aligns the student’s
+latent representations with those of a CoT-based teacher, re-
+moving reliance on the iterative curriculum. However, this
+approach still requires BPTT for optimization and incurs the
+additional computational cost of a separate teacher model.
+Emergent Latent Reasoning in Standard LLMs.Re-
+cent studies have revealed that standard LLMs can exhibit
+latent reasoning capabilities without explicit training. Biran
+et al. (2024) demonstrated this by successfully decoding
+intermediate reasoning steps from the model’s hidden states,
+while Yang et al. (2024) showed that LLMs can arrive at
+correct answers on queries that inherently require multi-
+hop reasoning. These findings suggest that some degree
+of latent reasoning emerges naturally during pretraining,
+making multi-hop question answering, which we include in
+our evaluation, an important testbed for methods designed
+to enhance this capability.
+Alternative Approaches to Latent Computation.A dis-
+tinct line of work aims to improve reasoning by providing
+models with additional computation time, rather than by in-
+ternalizing a specific reasoning trace. Goyal et al. (2023) in-
+troduced “pause tokens” during pretraining—tokens without
+semantic meaning that give the model extra computational
+steps before producing output, improving performance on
+downstream reasoning tasks. Geiping et al. (2025) proposed
+dynamic depth, where the same block of layers is applied
+repeatedly for a variable number of iterations, effectively
+increasing computation per token at inference time. Finally,
+Zelikman et al. (2024) enabled token-level rationale gener-
+ation by decoding auxiliary reasoning tokens before each
+prediction, training the model with reinforcement learning
+to produce helpful rationales. Unlike our approach, these
+auxiliary tokens influence only the current prediction and
+are discarded afterward, avoiding recurrent dependencies
+but also forgoing the ability to carry reasoning state across
+positions.
+2
+Latent Reasoning with Supervised Thinking States
+KV Cache T C
+Zi+3
+Si+2
+T C
+Zi
++
+Si
+ Si+1
+⠇ Si+3
+Lout
+Lin
+⠇
+T C
+Zi+2
+⠇ ⠇ ⠇
+⠇ ⠇
++ + +
+(a)Inference
+tails heads
+heads <EOS>tails <EOS>
+Predictions
+Labels
+tails
+✓      X
+<EOS>Labels
+Loss
+A coin’s state is heads. Alice flips, then Bob flips. What’s the state? A: heads.
+T
+C C
+⠇
+⠇
+⠇
+⠇
+⠇
+⠇
+⠇
+⠇
+heads <EOS>
+heads <EOS>
+✓ ✓
+T
+Si+1
+ Si+3
+<EOS>
+C
+Si+2
+<EOS>
+C
+Si
+ (b)Training
+Figure 2. Thinking Statesmodel at inference and training time. At inference time(a),Thinking Statesreasons by iteratively processing
+token chunks. At each iteration i, reasoning information encoded up to layer Lout is decoded by a thinking block T and compressed
+by a compression block C to a fixed-sizethinking state Si+1. The state is injected to the next chunk at a shallow layer to effectively
+influence future computations. Chunk representations can access the history via attention layers and the KV-cache. At training time(b),
+predictions by T are supervised by explicit annotations paired with each chunk. The same annotations are used to condition the base
+LLM’s reasoning, allowing parallel training.
+3. Thinking State Architecture and
+Supervision
+We introduce theThinking Statesmodel, illustrated in Fig-
+ure 2a. The core element of our architecture is a chunk-
+recurrent process of decoding thoughts from token repre-
+sentations, compressing thoughts into a fixed-size state, and
+injecting the state into representations of subsequent tokens
+at a shallow layer (e.g., the first layer).
+Because thoughts are decoded from representations in a
+deep layer (e.g., second to last), we leverage the backbone
+LLM to perform the bulk of the computation. This allows
+the decoding”Thinking Block”to remain lightweight and
+efficient, as it operates on a rich feature space. By injecting
+the compressed state into representations of future tokens at
+a shallow layer, we effectively condition on the reasoning
+process without extending the context. Sections 3.2, 3.3,
+provide details on how this recurrent process is executed
+efficiently at training and inference time.
+Setting.Let an input sequence of L tokens be partitioned
+into K non-overlapping chunks X1, . . . ,XK.2 Each Xi ∈
+Rc×d denotes the input embeddings of c tokens (where c=
+L/K) with hidden dimension d, extracted after a designated
+shallow layerL in of the LLM.
+2In the case Lmodc̸= 0 , input tokens are grouped into
+chunks along with generated tokens, once those are available.
+Our architecture augments a backbone LLM Mθ with two
+additional modules:
+(i) Thinking Block T : A lightweight Transformer decoder
+(one layer in our experiments) that autoregressively
+generates a reasoning sequence Z= (z 1, . . . , zn) in
+natural language.
+(ii) Compression Block C: A Transformer encoder with a
+pooling layer that maps any variable-length reasoning
+sequence into a fixed-size stateS∈R c×d.
+Further architectural details for T and C are provided in
+Appendix A.1.
+3.1. Architecture
+Thinking States processes token chunks iteratively while
+maintaining a state Si ∈R c×d. At each step i, we first
+inject the current state into the input representations at the
+shallow layer, then forward throughM θ:
+˜Xi =X i +S i (1)
+Hout
+i =M θ( ˜Xi | ˜X<i)(2)
+Here, Hout
+i denotes the chunk representations at a prede-
+fined deep layer Lout, and past representations ˜X<i are
+accessed through the KV-cache.
+3
+Latent Reasoning with Supervised Thinking States
+Next, Hout
+i is used to generate a sequence of natural-
+language thought tokens via the Thinking Block:
+Zi+1 =T(H out
+i )(3)
+The output Zi+1 is a variable-length token sequence ending
+with an <EOS> token. When no reasoning is required, Zi+1
+may consist solely of<EOS>.
+Finally, the Compression Block transforms the variable-
+length thought sequence into a fixed-size state for the next
+iteration:
+Si+1 =C(Z i+1)∈R c×d (4)
+For the first chunk, we initializeS 1 =0.
+This design serves two key ideas: compute sharing and re-
+currence. As inputs are a sum of tokens and states, eq. (1-2),
+the model effectively performs next token prediction while
+processing and generating states, executing both compu-
+tations in a single forward pass. By injecting states at a
+shallow layer, we allow thoughts to effectively condition
+future thoughts through most of the LLM’s hidden layers.
+Importantly, since the thought tokens are never appended to
+the backbone’s context window, the context length remains
+fixed.
+3.2. Training with Teacher-Forced Reasoning
+To supervise the generated thinking sequences Zi, we rely
+on explicit natural-language annotations. In our formulation,
+each token chunk in the training data is paired with a target
+reasoning sequence Z∗
+i of variable length. For chunks that
+require no intermediate reasoning, the target is simply the
+<EOS>token.
+Access to these ground-truth sequences Z∗
+i serves a dual
+purpose. As illustrated in Figure 2b, in addition to providing
+supervision for the outputs of T , we use Z∗
+i toteacher-force
+the states injected into the backbone LLM. Specifically, we
+compute the target state as S∗
+i =C(Z ∗
+i ) and inject it instead
+of the model-generated state:
+˜Xi =X i +S ∗
+i (5)
+Since all target sequencesZ ∗
+i are available upfront, we can
+compute all chunk representations Hout
+i in a single parallel
+forward pass through Mθ. This eliminates the need for back-
+propagation through time (BPTT), dramatically reducing
+the computational cost of training.
+After this forward pass, the Thinking Block T is trained to
+predict Z∗
+i via standard next-token prediction, in parallel
+over all chunks. Here, eachHout
+i is computed under the gold
+state history S∗
+1, . . . ,S∗
+i , so predicting Zi+1 is implicitly
+conditioned on all prior gold reasoning steps.
+We optimize the joint objective:
+L=L LM +
+KX
+i=1
+LT(Zi,Z ∗
+i )(6)
+where LLM is the standard language modeling loss and LT
+is cross-entropy loss over the thinking sequences. This
+formulation enables fully parallel training while ensuring
+that T learns to generate thoughts consistent with a valid
+reasoning history.
+3.3. Fast Prefill with Speculative Thinking
+While training is fully parallelizable, na ¨ıve inference re-
+mains sequential across chunks, as each ˜Xi depends on the
+previous state Si. This can significantly increase latency
+during query prefill.
+To mitigate this overhead, we exploit a key observation: for
+most chunks, the generated state istrivial, that is, the Think-
+ing Block produces only an <EOS> token. We leverage this
+sparsity to design an iterative yetexactprefill algorithm.
+The algorithm proceeds as follows:
+1. Perform a parallel forward pass over all chunks, specu-
+lating that all states are trivial.
+2. For each chunk, generate thinking states using T and
+C.
+3. Identify the earliest chunki1 that produces a non-trivial
+state. Since all chunks before i1 truly have trivial states,
+the computation up to chunki 1 is correct.
+4. Cache all positions up to i1 and repeat from step 1 for
+the remaining chunks, now conditioning on the correct
+state Si1 and speculating a trivial state for following
+chunks.
+The procedure terminates when no new non-trivial states are
+generated, yielding exactly the same result as full sequential
+prefill. If |R| denotes the (unknown a priori) number of
+chunks with non-trivial states, the algorithm completes in
+exactly |R|+ 1 rounds. In typical regimes where |R| ≪
+K, this substantially reduces prefill latency. A complete
+description of the algorithm is provided in Appendix A.2.
+3.4. Constructing Chunk-Level Supervision
+Training the Thinking Block requires supervision that spec-
+ifies bothwhereintermediate reasoning should occur and
+whatreasoning content to produce. We construct this super-
+vision by aligning CoT reasoning steps to specific positions
+in the input query.
+Consider the following example query and its CoT trajec-
+tory:
+4
+Latent Reasoning with Supervised Thinking States
+“A coin’s state is heads. Alice flips, then Bob flips.
+What’s the state?”
+CoT:“heads→tails→heads”
+Our goal is to map each reasoning step (which may span
+multiple tokens) to a specific position in the query where
+that step becomes inferable.
+Step-to-Token Alignment.We first align each reasoning
+step to the earliest query position where it can be logically in-
+ferred. This alignment is obtained either via a strong teacher
+model, e.g., Gemini 2.5-Flash (Comanici et al., 2025), or
+through programmatic rules when the task structure permits.
+The alignment is represented by inserting special indicator
+tokens<T>into the text:
+“A coin’s state is heads.<T> Alice flips,<T> then
+Bob flips.<T>What’s the state?”
+Each <T> marker indicates that the preceding context is
+sufficient to infer the corresponding reasoning step. We then
+tokenize the query and construct a corresponding reasoning
+array with the same length, where each position in the array
+is either empty or contains the reasoning step associated
+with the <T> token. The indicator tokens are removed after
+this alignment, ensuring they are never seen by the model
+during training.
+Token-to-Chunk Alignment.Given the aligned token
+sequence and reasoning array, we partition both into non-
+overlapping chunks of size c. The target reasoning sequence
+for each chunk is the concatenation of all reasoning steps
+assigned to tokens within that chunk. For chunks with no
+associated reasoning steps, the target is simply the <EOS>
+token.
+The entire process is applied only to the training data of
+each task we consider. Additional details can be found in
+Appendix A.3.
+4. Experiments
+We evaluate Thinking States on a diverse set of tasks that
+probe both reasoning accuracy and computational efficiency.
+Section 4.2 examines state-tracking, where Thinking States
+exhibits stronger length generalization than CoT. Section 4.3
+evaluates general reasoning on Multi-Hop QA and GSM8K,
+showing that Thinking States surpasses latent reasoning
+baselines and approaches CoT performance with significant
+speedups. Section 4.4 presents ablation studies exploring the
+performance–efficiency tradeoff as a function of recurrence
+depth and chunk size. Finally, Section 4.5 provides an
+interpretability-driven error analysis, identifying distinct
+failure modes and cases where Thinking States outperforms
+CoT.
+4.1. Experimental Setup
+All experiments useQwen2.5-Basemodels (Qwen et al.,
+2024) (0.5B and 1.5B parameters), fine-tuned on task-
+specific training data.
+We compare against four baselines:
+(i)CoT: fine-tuning on explicit chain-of-thought traces;
+(ii) No CoT: standard fine-tuning to predict the final an-
+swer directly;
+(iii) iCoT(Deng et al., 2024): a latent reasoning method
+that distills CoT into query representations via curricu-
+lum learning;
+(iv) Coconut(Hao et al., 2024): a state-of-the-art latent
+reasoning method using continuous thought tokens.
+We reproduce iCoT and Coconut results using the official
+codebase of Hao et al. (2024) with default configurations
+unless otherwise noted.
+Metrics.We report accuracy on gold answers across all
+tasks. For efficiency, we measure wall-clock speedup rel-
+ative to CoT on a single A100-80GB GPU. Unlike prior
+work (Hao et al., 2024; Deng et al., 2024), which reports ef-
+ficiency in terms of generated token count, we use wall-time
+because token generation with the lightweight Thinking
+Block T is substantially faster than standard autoregressive
+decoding.
+4.2. State Tracking Tasks
+State tracking tasks require monitoring quantities that evolve
+throughout the input (Merrill et al., 2024; Kim & Schuster,
+2023; Li et al., 2025). These tasks are a natural testbed
+for latent reasoning methods because they explicitly require
+sequential composition—each step depends on the result of
+previous steps. We evaluate on two synthetic tasks adapted
+from Anil et al. (2022):
+• Parity: tracking a single binary state through a se-
+quence of flip operations.
+• Variable Assignment (Vars): tracking multiple inter-
+acting integer variables, yielding more complex state
+dynamics.
+Both tasks are expressed in natural language; formal defini-
+tions and examples are provided in Appendix A.4.
+To assess whether the underlying base model truly learns to
+reason via the recurrent thinking state mechanism, we em-
+ploy a length generalization setting, drawing on the known
+extrapolation capabilities of recurrent models (Del ´etang
+et al., 2022). We fine-tune all methods, withQwen2.5-Base-
+0.5Bas the base model, on sequences of up to N operations
+(N∈ {10,20,40} ) and evaluate on lengths in [N,100] , in
+both cases, sampled uniformly over the range. All mod-
+5
+Latent Reasoning with Supervised Thinking States
+Table 1.Performance (accuracy) on State Tracking tasks, trained
+on samples with up to N state updates and evaluated on [N,100] .
+Parity Vars
+Method N=10 N=20 N=40 N=10 N=20 N=40
+No CoT 54.67 57.50 59.60 02.15 02.17 02.19
+CoT 12.35 38.12 64.38 06.78 35.45 87.75
+Thinking States 98.37 99.02 100.00 33.76 87.23 97.71
+Table 2.Performance and speedup (over CoT) on reasoning tasks
+for different latent reasoning baselines and CoT.
+GSM 2-HopFK2-HopPK
+Method Acc↑Speedup↑Acc Speedup Acc Speedup
+CoT 60.50×1 54.79×1 43.07×1
+No CoT 34.11×5.59 33.47×1.89 31.92×2.03
+Thinking States 42.22×2.66 54.91×1.19 43.05×1.23
+Coconut 32.65×3.14 33.71×1.14 32.60×1.21
+iCoT 34.00×5.71 28.84×1.59 36.31×1.80
+els are trained to 100% in-distribution accuracy to strictly
+isolate extrapolation capabilities from optimization effects.
+Table 1 reports out-of-distribution (OOD) accuracy for each
+training regime. The results demonstrate how a base LLM
+trained with Thinking States effectively adapts to reasoning
+with a recurrent mechanism, leading to stronger length gen-
+eralization than that of a model reasoning via CoT. Critically,
+this indicates that reasoning via the recurrent mechanism of-
+fers a more effective solution than CoT, requiring a simpler
+training distribution to achieve robust performance.
+Furthermore, while CoT generates intermediate tokens pro-
+portional to the number of state operations, considerably
+extending the context length and thus expressivity, Think-
+ing States maintains a static context size. By refining
+the query representation through state updates, Thinking
+States achieves superior length generalization, suggesting
+the model has learned to reason through the recurrent mech-
+anism.
+4.3. General Reasoning Capabilities
+We evaluate general reasoning capabilities on two estab-
+lished benchmarks. First, a 2-hop QA dataset, where prior
+work by Biran et al. (2024); Yang et al. (2024) demonstrated
+standard LLMs exhibit latent reasoning to some extent, pro-
+viding a useful test case for methods designed to improve
+latent reasoning. Second, a GSM8K-style dataset, consist-
+ing of ∼400K simple math word problems and parsed CoT
+steps, previously used by Deng et al. (2023); Hao et al.
+(2024). Methods in this section useQwen2.5-Base-1.5Bas
+the base model.
+For the 2-hop QA task, we consider two evaluation regimes.
+InFull Knowledge (FK), the required factual knowledge
+appears in the fine-tuning data, testing how well models
+acquire and manipulate knowledge with each method. In
+Parametric Knowledge (PK), examples are filtered to reflect
+the knowledge of the base LLM, isolating whether a method
+improves retrieval and manipulation of existing knowledge
+in the base model.
+Table 2 summarizes accuracy and speedups for each method.
+Among latent-reasoning baselines, Thinking States consis-
+tently achieves the highest accuracy across all tasks while
+maintaining significant speedups compared to CoT. On both
+variants of the 2-Hop task, Thinking States reaches similar
+performance to CoT with improved efficiency, demonstrat-
+ing a dramatic advantage over other non-CoT baselines,
+with more than a 20% and 7% increase in accuracy on the
+FKandPKvariants respectively.
+On the GSM task, Thinking States demonstrates consid-
+erably better performance compared to Coconut, No CoT
+and iCoT, improving accuracy by ∼8% and maintaining a
+considerable 2.66× speedup. The slight latency advantage
+showcased by Coconut on this task leads us to evaluate if
+performance can be improved at the cost of higher latency.
+As reported in Appendix A.5.1, we observe that increasing
+the number of latent steps leads to a modest improvement
+in performance, even as latency approaches that of the CoT
+model. In the next section, we provide several ablation stud-
+ies over possible compute-efficiency tradeoffs with Thinking
+States.
+Finally, we analyze the training costs of Thinking States
+compared to training with explicit recurrence and BPTT as
+in Coconut. Figure 6, in Appendix A.5.3, plots the wall-
+clock time per forward and backward pass as a function of
+the number of recurrent steps/number of chunks in the input
+sequence. The results demonstrate that while BPTT incurs
+linearly increasing costs, Thinking States maintains close to
+constant training time due to teacher forcing. Consequently,
+while BPTT becomes prohibitively expensive to scale, incur-
+ring a ∼10× cost penalty at just 10 steps, Thinking States
+enables efficient training regardless of reasoning depth.
+4.4. Ablation Study
+To understand the architectural factors governing Thinking
+States, we conduct two ablation studies over the GSM task.
+We ablate the impact of recurrence with a deep to shallow
+connection, by varying the layer to extract representations
+passed to T , and the impact of reasoning frequency, by
+varying the chunk size.
+Impact of Deep to Shallow Connections:In Figure 3a,
+we investigate the influence of deep to shallow recurrence
+by varying the extraction layer for T , keeping injection
+fixed at the first layer (as in previous experiments). Our
+6
+Latent Reasoning with Supervised Thinking States
+4 8 12 16 20 2426
+Num Layers in Recurrence
+20
+24
+28
+32
+36
+40
+44
+48
+Accuracy (%)
+No CoT Baseline: 34.11%
+3.12x 2.98x 2.97x2.86x2.78x2.72x2.66x
+Speedup over CoT
+(a)
+2 4 8 16 32 48
+Chunk Size
+20
+24
+28
+32
+36
+40
+44
+48
+Accuracy (%)
+No CoT Baseline: 34.11%
+2.42x 2.57x 2.66x 2.74x 2.83x2.86x
+Speedup over CoT (b)
+Figure 3.Ablation studies over deep to shallow recurrence(a)and effects of the chunk size(b), with measured speedup over CoT (top)
+at each point. In(a), performance increases with the number of layers used to process and generate states, pointing to the importance
+of the deep to shallow design. In(b), increasing the chunk size leads to improved latency with peak performance for medium chunks,
+highlighting the tradeoff between per-state capacity (large chunks) and reasoning frequency (small chunks).
+purpose is to show the importance of the deep to shallow
+recurrent principle, demonstrating that allocating more of
+the model’s capacity when processing and generating states
+leads to improved accuracy. Furthermore, this experiment
+highlights the inherent accuracy-latency tradeoff: utilizing
+fewer layers in the recurrent loop allows the remaining
+layers to be executed only during query prefill, resulting
+in higher speedups. For this analysis, we useQwen2.5-Base-
+1.5B, which contains 28 hidden layers.
+As shown in Figure 3a, performance increases monotoni-
+cally with the number of layers included in the recurrence,
+with a substantial accuracy gap of nearly 20% between the
+shallowest and deepest configurations. This trend confirms
+that maximizing the computational capacity available for
+processing and generating thinking states is critical for per-
+formance, effectively validating the deep-to-shallow design
+choice.
+Impact of Chunk Size:In Figure 3b, we study the effect
+of varying the chunk size. The chunk size controls two im-
+portant factors:(1)the computational capacity available for
+state processing and generation(2)the number ofexpected
+reasoning steps generated in each call to T . A small chunk
+size limits available capacity for each state, and is expected
+to generate less steps at each chunk. Conversely, larger
+chunks provide larger capacity, but may lead to encoding
+multiple sequential steps into single state. This latter sce-
+nario undermines the deep-to-shallow recurrence, as consec-
+utive steps generated within the same chunk cannot access
+the full recurrent loop, relying instead on the LLMs depth
+and limited capacity of the lightweight Thinking Block.
+The tradeoff discussed above is evident in Figure 3b, when
+the chunk size is small both performance and latency de-
+grade, which can be explained by lack of computational
+capacity and increased iterations during query processing.
+As the chunk size increases, latency improves due to fewer
+iterations during query processing. Increasing the chunk
+size beyond a certain point (c= 8 ) eventually leads to re-
+duced performance, which can be explained by the model
+compressing too many reasoning steps into single updates.
+Although performance decreases, we note that Thinking
+States still maintains a notable gap in performance compared
+to other latent reasoning methods even when approaching
+similar speedups.
+4.5. Error Analysis
+We analyze the performance gap between Thinking States
+and CoT on GSM-style problems. A key advantage
+of Thinking States over other latent reasoning methods
+is interpretability: because states are compressed from
+natural-language thoughts, the model’s reasoning remains
+inspectable.
+Where Thinking States succeeds and CoT fails.Despite
+the overall accuracy gap, approximately 12% of queries
+correctly solved by Thinking States arenotsolved by CoT,
+indicating that Thinking States mitigates certain CoT errors.
+Figure 4 shows two representative examples: (1) CoT hallu-
+cinates an additional reasoning step, and (2) CoT attempts
+an overly complex intermediate computation. In both cases,
+Thinking States produces a correct internal trajectory and
+answer. We note that both models are fine-tuned from the
+same base model and on identical data.
+7
+Latent Reasoning with Supervised Thinking States
+Example 1: Hallucinated Step
+Derrick has a bakery that makes 10
+dozen doughnuts every day,
+[T: 10 *12=120] selling at $2 per
+doughnut.[T: 120 *2=240] How much money
+does Derrick make in June if he sells
+all the doughnuts?[T: 240 *30=7200]The
+answer is 7200
+CoT Steps:10 *12=120 120 *2=240
+240*30=72007200 *6=43200
+Example 2: Over-Complex Computation
+Jess is trying to guess the number of
+blue jellybeans in a jar. She can see
+that there are 17 green jelly beans and
+twice as many red jelly beans.
+The[T: 17 *2=34] rest of the jellybeans
+are blue jelly beans. If there are a
+total of 60 jelly beans in total,
+[T: 17+34=51] how many blue jellybeans
+are there?[T: 60-51=9]The answer is 9
+CoT Steps:17 *2=3460-17-34=8
+Figure 4.Examples where Thinking States succeeds but CoT fails.
+Thinking States reasoning is shown in green. (1) CoT hallucinates
+an extra step. (2) CoT attempts multiple operations in one step and
+errs.
+Where CoT succeeds and Thinking States fails: State
+Ambiguity.We identify a distinct error pattern we term
+state ambiguity: in many GSM queries, the quantity of inter-
+est is specified only in the final clause and may be difficult
+to anticipate earlier. As illustrated in Figure 5, this leads
+Thinking States to reason about the wrong intermediate
+quantity. Although the correct answer is often recoverable
+via a simple transformation, such recovery requires exposure
+to similar patterns during training.
+We validate this hypothesis by prepending the final question
+to the start of the prompt for all error cases. This zero-
+shot intervention improves accuracy from 42.22 to 48.65,
+despite the augmented queries being out-of-distribution. No-
+tably, this limitation stems from the combination of Think-
+ing States with a causal autoregressive backbone rather than
+the thinking-state mechanism itself; bidirectional query pro-
+cessing could, in principle, identify the relevant quantity
+before committing to intermediate state updates.
+5. Conclusions
+In this work, we introduce Thinking States, a method that
+enables reasoning while processing input tokens without
+extending the model’s context. By relying on a recurrent
+state representation of the thinking trajectory, the model
+effectively conditions its token processing on intermediate
+reasoning steps Empirically, this leads to improved perfor-
+mance compared to other latent reasoning baselines while
+maintaining a significant efficiency advantage over Chain-
+(a) Original
+Richard lives in a building with 15
+floors. Each floor contains 8 units.
+[T: 15×8=120.]Three quarters of the
+units are occupied. [T: (3/4)×120=90.]
+What’s the number of unoccupied units
+on each floor?[T: 120-90=30.]
+Answer:30
+(b) Disambiguated
+What’s the number of unoccupied units
+on each floor?Richard lives in a
+building with 15 floors. Each floor
+contains 8 units. Three quarters of
+the units are occupied.
+[T: 0.75×8=6]What’s the number of
+unoccupied units on each floor?
+Answer:2
+Figure 5.Illustration ofstate ambiguity. In (a), Thinking States
+generates valid thoughts that are not aligned with the final clause
+in the query, leading to an error. By adding the information to the
+begining of the query, as in(b), the same model produces a correct
+answer, without training on the new format.
+of-Thought (CoT).
+Furthermore, a key contribution of our approach is the spe-
+cialized data construction process that maps reasoning steps
+to specific input chunks. This formulation ensures that
+the recurrent process does not optimize with BPTT during
+training. Instead, training is fully parallelizable via teacher
+forcing, leading to a substantial reduction in computational
+cost compared to prior recurrent methods.
+Our framework opens several avenues for future research.
+First, while we currently target query prefill, extending
+Thinking States to the decoding phase could enable allo-
+cating dynamic compute during token generation. Second,
+while our current approach relies on Supervised Fine-Tuning
+over existing CoT data, this model can serve as an effec-
+tive ”warm-start” initialization for Reinforcement Learn-
+ing. Starting from a model that has already learned to com-
+press reasoning into latent states could stabilize RL training,
+allowing the model to subsequently optimize its internal
+thinking process beyond the constraints of human-generated
+traces.
+Impact Statement
+This paper presents a method for improving the efficiency
+of reasoning in large language models. By reducing compu-
+tational costs relative to chain-of-thought approaches, our
+work may contribute to lowering the energy consumption
+and environmental footprint of deploying reasoning-capable
+language models. Additionally, because our method gener-
+ates interpretable natural-language thoughts, it may support
+efforts toward more transparent and auditable AI systems.
+8
+Latent Reasoning with Supervised Thinking States
+We do not foresee unique ethical concerns beyond those
+broadly associated with advances in language model capa-
+bilities.
+References
+Anil, C., Wu, Y ., Andreassen, A., Lewkowycz, A., Misra,
+V ., Ramasesh, V ., Slone, A., Gur-Ari, G., Dyer, E., and
+Neyshabur, B. Exploring length generalization in large
+language models.ArXiv preprint, abs/2207.04901, 2022.
+URLhttps://arxiv.org/abs/2207.04901.
+Biran, E., Gottesman, D., Yang, S., Geva, M., and
+Globerson, A. Hopping too late: Exploring the limi-
+tations of large language models on multi-hop queries.
+ArXiv preprint, abs/2406.12775, 2024. URL https:
+//arxiv.org/abs/2406.12775.
+Comanici, G., Bieber, E., Schaekermann, M., Pasupat, I.,
+Sachdeva, N., Dhillon, I., Blistein, M., Ram, O., Zhang,
+D., Rosen, E., et al. Gemini 2.5: Pushing the frontier
+with advanced reasoning, multimodality, long context,
+and next generation agentic capabilities.ArXiv preprint,
+abs/2507.06261, 2025. URL https://arxiv.org/
+abs/2507.06261.
+Dehghani, M., Gouws, S., Vinyals, O., Uszkoreit, J., and
+Kaiser, L. Universal transformers. In7th International
+Conference on Learning Representations, ICLR 2019,
+New Orleans, LA, USA, May 6-9, 2019. OpenReview.net,
+2019. URL https://openreview.net/forum?
+id=HyzdRiR9Y7.
+Del´etang, G., Ruoss, A., Grau-Moya, J., Genewein, T., Wen-
+liang, L. K., Catt, E., Cundy, C., Hutter, M., Legg, S., Ve-
+ness, J., and Ortega, P. A. Neural networks and the chom-
+sky hierarchy.ArXiv preprint, abs/2207.02098, 2022.
+URLhttps://arxiv.org/abs/2207.02098.
+Deng, Y ., Prasad, K., Fernandez, R., Smolensky, P., Chaud-
+hary, V ., and Shieber, S. Implicit chain of thought
+reasoning via knowledge distillation.ArXiv preprint,
+abs/2311.01460, 2023. URL https://arxiv.org/
+abs/2311.01460.
+Deng, Y ., Choi, Y ., and Shieber, S. From explicit cot to
+implicit cot: Learning to internalize cot step by step.
+ArXiv preprint, abs/2405.14838, 2024. URL https:
+//arxiv.org/abs/2405.14838.
+Geiping, J., McLeish, S., Jain, N., Kirchenbauer, J., Singh,
+S., Bartoldson, B. R., Kailkhura, B., Bhatele, A., and
+Goldstein, T. Scaling up test-time compute with latent
+reasoning: A recurrent depth approach.ArXiv preprint,
+abs/2502.05171, 2025. URL https://arxiv.org/
+abs/2502.05171.
+Goyal, S., Ji, Z., Rawat, A. S., Menon, A. K., Kumar,
+S., and Nagarajan, V . Think before you speak: Train-
+ing language models with pause tokens.ArXiv preprint,
+abs/2310.02226, 2023. URL https://arxiv.org/
+abs/2310.02226.
+Hao, S., Sukhbaatar, S., Su, D., Li, X., Hu, Z., Weston,
+J., and Tian, Y . Training large language models to
+reason in a continuous latent space.ArXiv preprint,
+abs/2412.06769, 2024. URL https://arxiv.org/
+abs/2412.06769.
+Hassid, M., Synnaeve, G., Adi, Y ., and Schwartz, R. Don’t
+overthink it. preferring shorter thinking chains for im-
+proved llm reasoning.ArXiv preprint, abs/2505.17813,
+2025. URL https://arxiv.org/abs/2505.
+17813.
+Kang, Y ., Sun, X., Chen, L., and Zou, W. C3ot: Generat-
+ing shorter chain-of-thought without compromising ef-
+fectiveness.ArXiv preprint, abs/2412.11664, 2024. URL
+https://arxiv.org/abs/2412.11664.
+Kaplan, G., Oren, M., Reif, Y ., and Schwartz, R. From
+tokens to words: On the inner lexicon of llms.ArXiv
+preprint, abs/2410.05864, 2024. URL https://
+arxiv.org/abs/2410.05864.
+Kim, N. and Schuster, S. Entity tracking in language models.
+ArXiv preprint, abs/2305.02363, 2023. URL https:
+//arxiv.org/abs/2305.02363.
+Li, B. Z., Guo, Z. C., and Andreas, J. (how) do language
+models track state?ArXiv preprint, abs/2503.02854,
+2025. URL https://arxiv.org/abs/2503.
+02854.
+Merrill, W., Petty, J., and Sabharwal, A. The illusion of
+state in state-space models. InProceedings of the 41st In-
+ternational Conference on Machine Learning, ICML’24.
+JMLR.org, 2024.
+Qwen, :, Yang, A., Yang, B., Zhang, B., Hui, B., Zheng, B.,
+Yu, B., Li, C., Liu, D., Huang, F., Wei, H., Lin, H., Yang,
+J., Tu, J., Zhang, J., Yang, J., Yang, J., Zhou, J., Lin, J.,
+Dang, K., Lu, K., Bao, K., Yang, K., Yu, L., Li, M., Xue,
+M., Zhang, P., Zhu, Q., Men, R., Lin, R., Li, T., Tang,
+T., Xia, T., Ren, X., Ren, X., Fan, Y ., Su, Y ., Zhang, Y .,
+Wan, Y ., Liu, Y ., Cui, Z., Zhang, Z., and Qiu, Z. Qwen2.5
+technical report.ArXiv preprint, abs/2412.15115, 2024.
+URLhttps://arxiv.org/abs/2412.15115.
+Shen, Z., Yan, H., Zhang, L., Hu, Z., Du, Y ., and He, Y . Codi:
+Compressing chain-of-thought into continuous space via
+self-distillation.ArXiv preprint, abs/2502.21074, 2025.
+URLhttps://arxiv.org/abs/2502.21074.
+9
+Latent Reasoning with Supervised Thinking States
+Wei, J., Wang, X., Schuurmans, D., Bosma, M., Ichter,
+B., Xia, F., Chi, E., Le, Q., and Zhou, D. Chain-of-
+thought prompting elicits reasoning in large language
+models.ArXiv preprint, abs/2201.11903, 2022. URL
+https://arxiv.org/abs/2201.11903.
+Xia, H., Leong, C. T., Wang, W., Li, Y ., and Li, W. To-
+kenskip: Controllable chain-of-thought compression in
+llms.ArXiv preprint, abs/2502.12067, 2025. URL
+https://arxiv.org/abs/2502.12067.
+Yang, S., Kassner, N., Gribovskaya, E., Riedel, S., and Geva,
+M. Do large language models perform latent multi-hop
+reasoning without exploiting shortcuts?ArXiv preprint,
+abs/2411.16679, 2024. URL https://arxiv.org/
+abs/2411.16679.
+Zelikman, E., Harik, G., Shao, Y ., Jayasiri, V ., Haber, N.,
+and Goodman, N. D. Quiet-star: Language models can
+teach themselves to think before speaking.ArXiv preprint,
+abs/2403.09629, 2024. URL https://arxiv.org/
+abs/2403.09629.
+A. Method - Additional Details
+A.1. Architecture
+We provide additional details on the thinking and compres-
+sion blocks, T and C and their integration with the base
+LLM, Mθ. In all reported experiments, except when explic-
+itly stated in section 4.4, we set the injection and extraction
+layer, Lin, Lout, to be after the first layer (excluding the
+token embedding layer) and after the second-to-last layer
+respectively.
+Both T and C share the same underlying core module, a
+causal Transformer block, sharing configurations and hyper-
+parameters (i.e., hidden size, number of attention heads,
+sliding/dense attention etc.) as the layers in Mθ. In our ex-
+periments, Mθ follows the architecture ofQwen2.5models,
+with model sizes listed in the main text. As the thinking
+head,T, is used for auto-regressive generation of language
+tokens, and is expected to return token embeddings, it addi-
+tionally includes an unembedding and embedding layer.
+This architecture facilitates the function of the thinking head
+and compression head as follows. At inference time, T pro-
+duces thoughts in natural-language through autoregressive
+generation, initially conditioned on the chunk of hidden
+representations Hout
+i ∈R c×d, where c, d denote the chunk
+size and the hidden size of Mθ. Each token predicted by
+T is passed through the embedding layer, and the resulting
+embedding is appended to the context of T . This results in a
+distribution mismatch, as Hout
+i (extracted from a deep layer)
+share the context with standard token embeddings. However,
+we observe that this does not lead to a significant limitations
+when the block is finetuned for next-token-prediction in the
+same setup, even with relatively little data as in 2-HopPK
+For C, to use the causal Transformer as a compression mod-
+ule, we apply a single parallel forward pass to all input
+token embeddings using a causal attention mask (though
+bidirectional attention is also valid) to obtain a contextualize
+representations. We then extract the last c representations to
+serve as the state Si injected to the next chunk, appending
+padding tokens to the input sequence if it is shorter than
+c. Through finetuning,Clearns to compress relevant infor-
+mation into future positions. We also experimented with
+appending a set of learnable queries appended to the query
+to make the compression explicit, however, this approach
+performed worse in practice.
+To initialize the parameters of the two modules, we utilize
+existing components from Mθ. Namely, the Transformer
+block in T is initialized as an independent copy of thelast
+layer of Mθ, while C is initialized as an independent copy
+of thefirstlayer (excluding the token embedding layer).
+The unembedding layer in T is initialized as an independent
+copy of the unembedding layer of Mθ while the embedding
+layer is shared withM θ (i.e., is not an independent copy).
+10
+Latent Reasoning with Supervised Thinking States
+For T , the motivation is to leverage parameters already
+trained to convert hidden representations into token pre-
+dictions. For C, the motivation is to leverage parameters
+trained to contextualize token embeddings (Kaplan et al.,
+2024) and generate a state sharing a latent space with the
+injection layer, which immediately follows the first layer.
+A.2. Fast Prefill with Speculated Thinking
+We provide a more detailed description of the fast prefill
+algorithm detailed in Section 3.3 in algorithm 13. The idea
+is using the sparsity of non-trivial states, generated by more
+than an <EOS>, to a few allow parallel execution instead
+of iteratively processing all chunks in the query. This is
+achieved by always speculating future states are trivial, ap-
+plying a parallel pass conditioned on the speculation, then
+correcting for the first location where the assumption breaks
+and repeating.
+This process is guaranteed to terminate in exactly |R|+ 1
+iterations, where |R| is the number of non-trivial states gen-
+erated, which is unknown in advance. As each iteration after
+the first implies exactly one non-trivial state was generated,
+this leads to exactly|R|+ 1rounds.
+In algorithm 1, we explicitly denote that Mθ returns a set of
+hidden representations H from all layers, only then extract-
+ing the target representation Hout
+i to emphasize all repre-
+sentations are stored in the cache. Additionally, for ease of
+presentation, the algorithm omits the fact that when finished,
+the representation of the last position in the input is used to
+generate the next token, as is in standard decoding.
+A.3. Constructing Chunk-Level Supervision
+As mentioned in the main text, Section 3.4, chunk level
+supervision for the Thinking Block is obtained by mapping
+reasoning steps to specific positions in the input query. The
+mapping is realized by placing special indicator tokens in
+the query text.
+Once the query is tokenized, the special tokens allow us
+to construct a matching reasoning array sharing the same
+length. At every position in the query containing an indica-
+tor token, we insert the matching reasoning sequence to the
+same position in the reasoning array. In the vast majority
+of cases, the desired supervision is obtained by shifting the
+reasoning array one position to the left, then removing all
+entries containing a special token in the query sequence,
+from the query tokens and the reasoning array.
+A small number of cases contain multiple consecutive indi-
+cator tokens that are placed in succession. In these cases,
+we assign the matching steps in order, starting from the
+3Full version can be reviewed in our codebase, which we plan
+to fully release
+Algorithm 1Fast Speculative Prefill
+Input:Query chunks X1...K, Backbone Mθ, Thinking
+BlockT ϕ, CompressionC ϕ, Chunk Sizec
+t= 0
+kv=init cache()
+Si = ˆ0∈R c×d i∈[0, . . . , K−1]{ Speculate
+thoughts}
+S=concat([S 1, . . . ,Sk])
+X=concat([X 1, . . . ,Xk])
+f inished=f alse
+whilenot f inisheddo
+˜X=S+X
+H=M θ( ˜X, past kv=kv)
+H out =extract(H, L out)
+Hout
+i =chunk(H out, c)i∈[t, . . . , K]
+Si+1 =C ϕ2 (Tϕ1 (Hout
+i ))
+t=f ind f irst true(Si ̸= ˆ0)
+iftisN onethen
+f inished=true
+kv.cache(H, max index=N one)
+else
+kv.cache(H, max index=t)
+S=concat([S t, ˆ0, . . . ,ˆ0])
+X=concat([X t,X t+1, . . . ,Xk])
+end if
+end while
+returnkv,S −1
+first token positionprecedingthe first indicator. In case the
+reasoning steps”overflow”the token sequence length, these
+steps are concatenated together with a special separator to-
+ken.
+A.4. State Tracking Tasks
+We provide the definitions for the state tracking tasks used
+for evaluation in Section 4.2,”Parity”and”Variable As-
+signment”(abbreviated to”Vars”).
+Parity:The parity task acts as a natural language version
+of the standard parity prediction problem over binary se-
+quences, which is commonly used when evaluating extrapo-
+lation capabilities in various architectures (Dehghani et al.,
+2019; Anil et al., 2022; Del ´etang et al., 2022). Over bi-
+nary sequences, e.g., s= 00101011 , the task is predicting
+sum(s) mod 2 . To represent the task in natural language,
+we transform the binary sequence into a query describing
+operations applied to a coin by two entities. When pro-
+viding supervision to T , the indicator token mentioned in
+Section 3.4 is placed after each operation, paired with the
+current state.
+Anabbreviatedquery is provided in Figure 2a and a full
+query, equivalent to the binary sequence s= 1011 , is given
+11
+Latent Reasoning with Supervised Thinking States
+here, along with indicator tokens and the matching labels:
+”The coin starts at state heads.<T> Alice doesn’t
+flip the coin. <T> Bob flips the coin. <T> Alice
+flips the coin.<T> The final state of the coin is
+heads.”
+Reasoning Targets: [”heads<eos>”,
+”heads<eos>”, ”tails <eos>”, ”heads <eos>”]
+Where <T> denotes the indicator token and blue denotes
+text that converted into target tokens for predictions. In
+this formulation, increasing the number of state operations
+directly translates to longer binary sequences, i.e., more
+operations applied to the coin.
+Variable Assignment (Vars):This task extends the state
+tracking setting to multiple integer-valued variables whose
+updates may depend on one another, requiring complex state
+updates (Anil et al., 2022). Unlike Parity, which tracks a
+single binary state, Vars requires maintaining the values
+of multiple variables (e.g., a, b, c) and executing arithmetic
+operations (e.g., b=b+a ) that reference the current state
+of other variables.
+The task is represented in natural language as a sequence
+of assignment operations. To generate supervision for T ,
+similar to the Parity task, we insert the indicator token <T>
+after each operation paired with the value of the updated
+variable.
+An example query, equivalent to the provided raw input, is
+formatted below with indicator tokens and the correspond-
+ing reasoning targets (derived using modular arithmetic con-
+sistent with the final values):
+”Track the variables values: a=1; b=2 a=a+b<T>
+b=b+a<T>b=b+3<T>Final values: a=3 b=8”
+Reasoning Targets: [”a=3<eos>”,
+”b=5<eos>”, ”b=8<eos>”]
+A.5. General Reasoning Capabilities
+A.5.1. COCONUT- ADDITIONALRESULTS
+As mentioned in the main paper, we scale computation
+with Coconut by increasing the number of latent thinking
+tokens. This is achieved by increasing the number of latent
+tokens introduced in each round of the curriculum, out of 3
+rounds in total, excluding the initial phase training the CoT
+checkpoint used for initialization. As is evident in Table 3
+The experiment in the main paper uses 2 thinking tokens
+per round,6in total.
+A.5.2. DATACONSTRUCTION FORGSM
+As mentioned in the introduction, for the GSM task, we rely
+on a strong teacher model (Gemini-2.5 Flash (Comanici
+Table 3.Coconut (Hao et al., 2024) performance and speedup as
+computation increases, by increasing the number of latent steps.
+Num. Latents Acc Speedup
+6 32.65 3.14×
+9 33.48 2.53×
+12 31.29 2.08×
+15 32.35 1.77×
+21 32.65 1.38×
+et al., 2025)) to transform existing parsed CoT data into the
+mapping used to supervise the thinking head. We achieve
+this by prompting the teacher model with a prompt similar to
+the one presented in Figure 7, removing two of the in context
+examples for readability. Using the structured output, we are
+able to extract the transformed query and matching thinking
+steps. To validate the process, we only include samples
+whose queries and thinking steps provide an exact string
+match to the source query and thinking steps, once the
+indicator tokens <THINK> are removed, discarding any
+samples that result in a mismatch. After validation we are
+left with375,101/385,620samples, or97.2%.
+2 4 6 8 10 12 14 16
+Number of Chunks / Latents
+10 1
+100
+Time (s)
+Coconut
+Thinking States
+Forward
+Backward
+Figure 6.Training Cost AnalysisComparison of wall-clock
+time for forward and backward passes on a fixed-length input
+(L= 128 ) as a function of the number of recurrent steps (chunks).
+Methods relying on BPTT demonstrate linear scaling in time,
+circumvented by teacher forcing in Thinking States despite the
+added dimensionality and computational overhead ofT.
+A.5.3. TRAININGCOMPUTE
+We quantify the computational advantage of training Think-
+ing States with teacher forcing compared to latent reason-
+ing methods that rely on Backpropagation Through Time
+(BPTT), such as Coconut. Figure 6 illustrates the wall-clock
+12
+Latent Reasoning with Supervised Thinking States
+time required for a single forward and backward pass on
+a fixed-length sequence, as a function of the number of
+recurrent steps (Coconut) or number of chunks 4 (Think-
+ing States), by controlling the chunk size relative to the
+sequence length. We use a batch size of 1 and a sequence
+length of 128 tokens.
+As shown in Figure 6, training with BPTT exhibits a linear
+increase in wall-time for both forward and backward passes
+as the number of latent steps grows. In contrast, Thinking
+States maintains close to constant training time regardless
+of the number of chunks, as the availability of ground-truth
+states allows for fully parallelized computation. The small
+variation in wall-time for Thinking States is explained by the
+additional dimensionality of decoding reasoningsequence
+from fixed-size token chunks. Yet, as visible in the figure,
+these variations are small compared to the increase in cost
+due to BPTT.
+4Here the chunk size accordingly, we note that k chunks imply
+krecurrent steps at inference time.
+13
+Latent Reasoning with Supervised Thinking States
+Prompt for GSM Data Generation
+You are an expert in computational linguistics. Your task is to augment a given
+query with thinking markers (<THINK>) based on a provided reasoning trace. This
+involves identifying the precise locations in the text where specific calculations
+can be performed.
+Task Instructions:1.Analyze Inputs:You will receive two inputs:
+•A Query: A question or word problem.
+•A Reasoning Trace: An ordered list of strings, where each string is a distinct
+mathematical calculation required to solve the query.
+2.Produce Two Outputs:
+•query: This is the original Query text, but with the special token <THINK>
+inserted at specific locations.
+•thinking: This is the ordered list of calculations.
+3.Rules for <THINK> Placement:
+•The number of <THINK> tokens inserted into the query must be exactly equal to
+the number of calculations in the Reasoning Trace.
+•The order of the <THINK> tokens in the query must correspond one-to-one with the
+order of the calculations in the Reasoning Trace.
+•For each calculation, you must insert its corresponding <THINK> token at the
+earliest possible locationin the query. This location is defined as the
+point immediately after the word or phrase that provides the final piece of
+information needed to perform that specific calculation.
+4.Rule for the thinking List:
+•The thinking output list is simply a direct copy of the ordered list of
+calculations provided in the Input Reasoning Trace.
+5.Output Format:
+•The output should be provided as a python dictionary with two keys: query and
+thinking.
+•The values should be wrapped in <<>> to support easy parsing.
+•Example:
+{
+"query": "<<Your modified query here>>",
+"thinking": <<[’<<calculation1>>’, ’<<calculation2>>’, ...]>>
+}
+Examples
+Example 1:
+•Input Query:’Hannah has three dogs. The first dog eats 1.5 cups of dog food a
+day. The second dog eats twice as much while the third dog eats 2.5 cups more than
+the second dog. How many cups of dog food should Hannah prepare in a day for her
+three dogs?’
+•Input Reasoning Trace:[’<<1.5 *2=3>>’, ’<<3+2.5=5.5>>’, ’<<1.5+3+5.5=10>>’]
+Required Output:
+{
+"query": <<’Hannah has three dogs. The first dog eats 1.5 cups of dog food a day.
+The second dog eats twice as much<THINK> while the third dog eats 2.5 cups more than
+the second dog.<THINK> How many cups of dog food should Hannah prepare in a day for
+her three dogs?<THINK> ’>>,
+"thinking": <<[’<<1.5 *2=3>>’, ’<<3+2.5=5.5>>’, ’<<1.5+3+5.5=10>>’]>>
+}
+TaskNow, perform this transformation for the following input and return your output as a
+python dictionary.
+Query:
+<<QUERY>>
+Reasoning Trace:
+<<REASONING TRACE>>Produce your output as a python dictionary in the specified format below:
+{
+"query": <<ADD YOUR OUTPUT HERE>>,
+"thinking": <<ADD YOUR OUTPUT HERE>>
+}
+Figure 7.The abbreviated version of few-shot prompt used to generate the alignment data. The prompt instructs the model to act as a
+computational linguist and inject <THINK> tokens into the query corresponding to specific reasoning steps. The full prompt used is
+identical except for containing 2 additional in-context examples, similar to the example provided.
+14
